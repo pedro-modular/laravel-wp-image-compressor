@@ -67,7 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - `help` command printed nothing due to an off-by-one in the doc-block reader.
 
-## [1.0.0] - 2026-07-07
+## 1.0.0 - 2026-07-07 (pre-release, unpublished)
 
 ### Added
 - `image-compressor.php`: single-file PHP compressor (Imagick or GD) for shared
@@ -80,6 +80,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one-command revert, never-grow-a-file guarantee, dry-run mode, and per-file plus
   total savings summaries.
 
+[1.3.0]: https://github.com/pedro-modular/laravel-wp-image-compressor/releases/tag/v1.3.0
 [1.2.0]: https://github.com/pedro-modular/laravel-wp-image-compressor/releases/tag/v1.2.0
 [1.1.0]: https://github.com/pedro-modular/laravel-wp-image-compressor/releases/tag/v1.1.0
-[1.0.0]: https://github.com/pedro-modular/laravel-wp-image-compressor/releases/tag/v1.0.0
