@@ -58,6 +58,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one-command revert, never-grow-a-file guarantee, dry-run mode, and per-file plus
   total savings summaries.
 
-[1.2.0]: https://github.com/OWNER/REPO/releases/tag/v1.2.0
-[1.1.0]: https://github.com/OWNER/REPO/releases/tag/v1.1.0
-[1.0.0]: https://github.com/OWNER/REPO/releases/tag/v1.0.0
+[1.2.0]: https://github.com/pedro-modular/laravel-wp-image-compressor/releases/tag/v1.2.0
+[1.1.0]: https://github.com/pedro-modular/laravel-wp-image-compressor/releases/tag/v1.1.0
+[1.0.0]: https://github.com/pedro-modular/laravel-wp-image-compressor/releases/tag/v1.0.0
