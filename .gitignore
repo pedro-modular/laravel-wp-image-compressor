@@ -1,0 +1,13 @@
+# Runtime state created by the tool itself (backups, config, registry)
+.image-compressor/
+
+# Temp files created during compression
+*.ic-tmp
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Editors
+.idea/
+.vscode/
