@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-07-07
+
+### Security
+- **Config file no longer leaks on nginx.** The stored bcrypt password hash and
+  API token now live in a self-guarding `config.php` that returns `403 Forbidden`
+  on any direct web request, instead of a world-readable `config.json`. A
+  `web.config` (IIS) is written alongside the existing `.htaccess`.
+- **Dedicated API token for automation.** Cron/scripts now authenticate with a
+  separate randomly-generated token (not the login password), sent via an
+  `Authorization: Bearer` header so it stays out of server access logs. The
+  dashboard shows a ready-to-copy cron command. `?token=` in the URL still works
+  but is discouraged.
+- **Session & CSRF hardening.** Session cookies are now `HttpOnly`,
+  `SameSite=Strict`, and `Secure` on HTTPS; logout is CSRF-guarded so a forged
+  link cannot force a sign-out.
+- **Symlink-escape protection.** The scanner no longer follows symlinks, and each
+  file's real path is confirmed to be inside the scanned tree before it is
+  backed up or overwritten. Temp files use `tempnam()` instead of a predictable
+  name.
+- **Bash `--backup` validation.** `compress-images.sh revert` now rejects any
+  `--backup` value that is not a `latest`/timestamp, closing a path-traversal gap.
+
 ## [1.2.0] - 2026-07-07
 
 ### Security

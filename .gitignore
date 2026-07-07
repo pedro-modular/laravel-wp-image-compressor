@@ -3,6 +3,10 @@
 
 # Temp files created during compression
 *.ic-tmp
+.ic-*
+
+# One-time setup proof-of-ownership file
+image-compressor-ALLOW-SETUP.txt
 
 # OS noise
 .DS_Store

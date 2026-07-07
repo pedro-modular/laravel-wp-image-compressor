@@ -43,8 +43,15 @@ Two interchangeable flavors — same commands, same backup format, same safety r
 4. Big sites are handled automatically — the run pauses before the PHP time limit and continues itself until everything is done.
 5. **Delete the file from the server when you are finished.**
 
-Power users can skip the wizard by hardcoding `const ACCESS_TOKEN = '...'` in the file, and can call the plain-text API directly:
-`...?token=YOUR_PASSWORD&action=compress|revert|list-backups|delete-backup` with optional `dry_run=1`, `no_resize=1`, `quality=82`, `max_dim=2000`, `min_size=10`, `limit=200`, `backup=latest|20260707-153012`.
+The dashboard shows a ready-to-copy **cron command** using a dedicated API token (separate from your login password). Power users can skip the wizard by hardcoding `const ACCESS_TOKEN = '...'` in the file. The plain-text API accepts `action=compress|revert|list-backups|delete-backup` with optional `dry_run=1`, `no_resize=1`, `quality=82`, `max_dim=2000`, `min_size=10`, `limit=200`, `backup=latest|20260707-153012`.
+
+Authenticate the API with your token in a header (kept out of server logs), e.g.:
+
+```bash
+wget -q --header="Authorization: Bearer YOUR_API_TOKEN" -O- "https://your-site.com/image-compressor.php?action=compress"
+```
+
+Passing `?token=YOUR_API_TOKEN` in the URL also works but is discouraged, since URLs are written to access logs.
 
 ### Option B: cPanel cron job or SSH
 
@@ -52,10 +59,10 @@ Power users can skip the wizard by hardcoding `const ACCESS_TOKEN = '...'` in th
 php /home/youruser/public_html/image-compressor.php compress --path=/home/youruser/public_html
 ```
 
-Or as a URL-based cron (cPanel "cron job" with wget/curl), using the password you chose in the wizard:
+Or as a URL-based cron (cPanel "cron job" with wget/curl), using the API token shown on the dashboard:
 
 ```bash
-wget -qO- "https://your-site.com/image-compressor.php?token=YOUR_PASSWORD&action=compress"
+wget -q --header="Authorization: Bearer YOUR_API_TOKEN" -O- "https://your-site.com/image-compressor.php?action=compress"
 ```
 
 ### CLI usage

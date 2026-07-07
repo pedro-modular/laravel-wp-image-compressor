@@ -29,21 +29,28 @@
  *   php image-compressor.php list-backups   [--path=DIR]
  *   php image-compressor.php delete-backup  [--path=DIR] [--backup=TIMESTAMP|latest]
  *
- * Cron / scripted URL usage (plain-text output):
- *   .../image-compressor.php?token=YOUR_PASSWORD&action=compress
- *   .../image-compressor.php?token=YOUR_PASSWORD&action=revert&backup=latest
- *   (token = the password you chose in the wizard, or ACCESS_TOKEN if set below)
+ * Cron / scripted usage (plain-text output). Authenticate with the API token
+ * shown on the dashboard, sent as a header so it stays out of access logs:
+ *   wget -q --header="Authorization: Bearer YOUR_API_TOKEN" -O- \
+ *     ".../image-compressor.php?action=compress"
+ *   (?token=YOUR_API_TOKEN in the URL also works but is logged; header preferred)
  *
  * License: MIT
  */
 
-const IC_VERSION      = '1.2.0';
+const IC_VERSION      = '1.3.0';
 const ACCESS_TOKEN    = '';                 // Optional: hardcode a secret to skip the wizard. Empty = use wizard password.
 const BACKUP_DIRNAME  = '.image-compressor';
 const EXCLUDED_DIRS   = [BACKUP_DIRNAME, 'node_modules', 'vendor', '.git'];
 const IMAGE_EXTS      = ['jpg', 'jpeg', 'png', 'webp'];  // GIFs are left alone (animation-safe)
 const MAX_MEGAPIXELS  = 100;                // Skip images larger than this (decompression-bomb guard)
 const SETUP_SENTINEL  = 'image-compressor-ALLOW-SETUP.txt';  // Proof-of-ownership file for first-time setup
+
+// Marker proving the config file is being read by this script (via include),
+// not fetched directly over the web. The config file refuses to reveal anything
+// unless this is defined — so the stored secrets stay safe even on servers that
+// ignore .htaccess (e.g. nginx).
+define('IC_INTERNAL', true);
 
 error_reporting(E_ALL & ~E_DEPRECATED);
 @set_time_limit(0);
@@ -164,6 +171,13 @@ function cmdCompress(array $cfg): void
         }
         $processed++;
 
+        // Never follow a symlink or write outside the scanned tree.
+        if (is_link($file)) { continue; }
+        $realFile = realpath($file);
+        if ($realFile === false || !str_starts_with($realFile, $cfg['path'] . DIRECTORY_SEPARATOR)) {
+            continue;
+        }
+
         $rel    = relPath($file, $cfg['path']);
         $before = filesize($file);
         $perms  = fileperms($file) & 0777;
@@ -175,8 +189,10 @@ function cmdCompress(array $cfg): void
         @touch($bkp, filemtime($file));
         @chmod($bkp, $perms);
 
-        // --- Compress to a temp file next to the original ---
-        $tmp = $file . '.ic-tmp';
+        // --- Compress to a unique temp file next to the original ---
+        // tempnam() avoids a predictable name a pre-planted symlink could hijack.
+        $tmp = @tempnam(dirname($file), '.ic-');
+        if ($tmp === false) { @unlink($bkp); $skipped++; continue; }
         $okTmp = null;
         try {
             $okTmp = compressImage($engine, $file, $tmp, $cfg);
@@ -583,11 +599,13 @@ function iterateFiles(string $dir): Generator
     $it = new RecursiveIteratorIterator(
         new RecursiveCallbackFilterIterator(
             new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS),
-            fn (SplFileInfo $f) => !($f->isDir() && in_array($f->getFilename(), EXCLUDED_DIRS, true))
+            fn (SplFileInfo $f) =>
+                !$f->isLink()  // never descend into or list symlinks (avoids escaping the tree)
+                && !($f->isDir() && in_array($f->getFilename(), EXCLUDED_DIRS, true))
         )
     );
     foreach ($it as $f) {
-        if ($f->isFile()) { yield $f->getPathname(); }
+        if ($f->isFile() && !$f->isLink()) { yield $f->getPathname(); }
     }
 }
 
@@ -598,11 +616,19 @@ function ensureStateDir(string $path): string
 {
     $dir = $path . '/' . BACKUP_DIRNAME;
     mkdirp($dir);
-    // Block direct web access to backups/config (Apache/LiteSpeed honor this)
+    // Block direct web access to backups/config. Apache/LiteSpeed honor .htaccess;
+    // IIS honors web.config. (nginx ignores both — the config file self-guards in
+    // PHP regardless, and SECURITY.md documents the nginx deny rule for backups.)
     if (!is_file("$dir/.htaccess")) {
         file_put_contents("$dir/.htaccess",
             "<IfModule mod_authz_core.c>\nRequire all denied\n</IfModule>\n"
             . "<IfModule !mod_authz_core.c>\nDeny from all\n</IfModule>\n");
+    }
+    if (!is_file("$dir/web.config")) {
+        file_put_contents("$dir/web.config",
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<configuration><system.webServer>\n"
+            . "<authorization><deny users=\"*\" /></authorization>\n"
+            . "</system.webServer></configuration>\n");
     }
     if (!is_file("$dir/index.html")) {
         file_put_contents("$dir/index.html", '');
@@ -662,20 +688,36 @@ function saveRegistry(array $cfg, array $registry): void
 
 function configFilePath(): string
 {
-    return __DIR__ . '/' . BACKUP_DIRNAME . '/config.json';
+    // Stored as a .php file that returns its data only to this script. A direct
+    // web request executes the guard and gets HTTP 403 instead of the contents.
+    return __DIR__ . '/' . BACKUP_DIRNAME . '/config.php';
 }
 
 function loadWebConfig(): array
 {
-    if (!is_file(configFilePath())) { return []; }
-    $data = json_decode((string)file_get_contents(configFilePath()), true);
-    return is_array($data) ? $data : [];
+    $file = configFilePath();
+    if (is_file($file)) {
+        $data = include $file;
+        return is_array($data) ? $data : [];
+    }
+    // One-time fallback: read a legacy plaintext config.json if present.
+    $legacy = __DIR__ . '/' . BACKUP_DIRNAME . '/config.json';
+    if (is_file($legacy)) {
+        $data = json_decode((string)file_get_contents($legacy), true);
+        return is_array($data) ? $data : [];
+    }
+    return [];
 }
 
 function saveWebConfig(array $config): void
 {
     ensureStateDir(__DIR__);
-    file_put_contents(configFilePath(), json_encode($config), LOCK_EX);
+    $php = "<?php\n// Auto-generated. Do not edit.\n"
+         . "if (!defined('IC_INTERNAL')) { http_response_code(403); die('Forbidden'); }\n"
+         . 'return ' . var_export($config, true) . ";\n";
+    file_put_contents(configFilePath(), $php, LOCK_EX);
+    @chmod(configFilePath(), 0600);
+    @unlink(__DIR__ . '/' . BACKUP_DIRNAME . '/config.json');  // remove any legacy plaintext copy
 }
 
 // ---------------------------------------------------------------------------
@@ -711,6 +753,25 @@ function verifySecret(string $secret): bool
     return $hash !== null && password_verify($secret, $hash);
 }
 
+/** Validate the dedicated API token used by cron/scripts (separate from the login password). */
+function verifyApiToken(string $token): bool
+{
+    if ($token === '') { return false; }
+    if (ACCESS_TOKEN !== '') { return hash_equals(ACCESS_TOKEN, $token); }
+    $stored = loadWebConfig()['api_token'] ?? null;
+    return $stored !== null && hash_equals($stored, $token);
+}
+
+/** Prefer the Authorization header (kept out of access logs) over ?token= in the URL. */
+function apiTokenFromRequest(array $req): string
+{
+    $auth = $_SERVER['HTTP_AUTHORIZATION'] ?? ($_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? '');
+    if (stripos($auth, 'Bearer ') === 0) {
+        return trim(substr($auth, 7));
+    }
+    return (string)($req['token'] ?? '');
+}
+
 function sessionAuthed(array $req): bool
 {
     return !empty($_SESSION['auth'])
@@ -723,13 +784,20 @@ function sessionAuthed(array $req): bool
 function webEntry(): void
 {
     session_name('imgcompressor');
+    $https = (!empty($_SERVER['HTTPS']) && strtolower($_SERVER['HTTPS']) !== 'off')
+        || (int)($_SERVER['SERVER_PORT'] ?? 0) === 443
+        || strtolower($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https';
+    session_set_cookie_params([
+        'lifetime' => 0, 'path' => '/', 'secure' => $https,
+        'httponly' => true, 'samesite' => 'Strict',
+    ]);
     @session_start();
     $req = array_merge($_GET, $_POST);
     $action = (string)($req['action'] ?? '');
     $isPost = $_SERVER['REQUEST_METHOD'] === 'POST';
 
     if ($action === 'logout') {
-        session_destroy();
+        if (sessionAuthed($req)) { session_destroy(); }  // CSRF-guarded; a forged link cannot force logout
         header('Location: ' . selfUrl());
         exit;
     }
@@ -744,10 +812,12 @@ function webEntry(): void
             http_response_code(403);
             exit("Not set up yet. Open this script in a browser and complete the setup wizard first.\n");
         }
-        $tokenOk = verifySecret((string)($req['token'] ?? ''));
+        $secret  = apiTokenFromRequest($req);
+        $tokenOk = verifyApiToken($secret) || verifySecret($secret);  // dedicated API token, or login password
         if (!$tokenOk && !sessionAuthed($req)) {
             http_response_code(403);
-            exit("Access denied. Pass ?token=YOUR_PASSWORD or log in through the browser.\n");
+            exit("Access denied. Send your API token via the 'Authorization: Bearer <token>' header "
+                . "(preferred), or log in through the browser.\n");
         }
         session_write_close();  // don't block other tabs during long runs
         header('Content-Type: text/plain; charset=utf-8');
@@ -790,10 +860,14 @@ function handleAuthPost(string $action, array $req): void
         } elseif (strlen($password) < 8) {
             flash('Please choose a password of at least 8 characters.');
         } else {
-            saveWebConfig(['password_hash' => password_hash($password, PASSWORD_DEFAULT), 'created' => date('c')]);
+            saveWebConfig([
+                'password_hash' => password_hash($password, PASSWORD_DEFAULT),
+                'api_token'     => bin2hex(random_bytes(24)),  // separate secret for cron/scripts
+                'created'       => date('c'),
+            ]);
             @unlink(setupSentinelPath());  // one-time proof; remove so the gate can't be reused
             loginSession();
-            flash('Setup complete! Keep your password safe — you will need it to log in and for cron jobs.');
+            flash('Setup complete! Keep your password safe — you will need it to log in.');
         }
     }
 
@@ -958,8 +1032,9 @@ function renderDashboard(): void
     $type   = detectProjectType($path);
     $dirs   = detectScanDirs($path, false, false);  // tolerate a project with no image folders yet
     $engine = extension_loaded('imagick') ? 'Imagick' : (extension_loaded('gd') ? 'GD' : 'none');
-    $csrf   = json_encode($_SESSION['csrf'] ?? '');
-    $url    = e(selfUrl());
+    $csrf    = json_encode($_SESSION['csrf'] ?? '');
+    $csrfRaw = e((string)($_SESSION['csrf'] ?? ''));
+    $url     = e(selfUrl());
 
     $dirList = $dirs
         ? implode(', ', array_map(fn ($d) => e(relPath($d, $path) ?: '.'), $dirs))
@@ -967,7 +1042,7 @@ function renderDashboard(): void
     $typeLabel = $type === 'generic' ? 'Website folder' : e($type) . ' website';
 
     echo <<<HTML
-    <div class="topbar"><h1>🖼️ Image Compressor</h1><a href="$url?action=logout">Log out</a></div>
+    <div class="topbar"><h1>🖼️ Image Compressor</h1><a href="$url?action=logout&amp;csrf=$csrfRaw">Log out</a></div>
 
     <div class="card">
       <h2>$typeLabel <span class="badge">engine: $engine</span></h2>
@@ -1025,8 +1100,25 @@ function renderDashboard(): void
         }
         echo '</table><p class="muted" style="margin-top:10px">Backups hold the full-size originals — delete them once you are happy with the results to free up space.</p>';
     }
+    echo '</div>';
 
-    echo '</div><p class="muted" style="text-align:center">image-compressor v' . IC_VERSION
+    // Automation card — show the dedicated API token and a ready-to-copy cron line.
+    $apiToken = loadWebConfig()['api_token'] ?? '';
+    if ($apiToken !== '') {
+        $host = $_SERVER['HTTP_HOST'] ?? 'your-site.com';
+        $scheme = (!empty($_SERVER['HTTPS']) && strtolower($_SERVER['HTTPS']) !== 'off') ? 'https' : 'http';
+        $fullUrl = e($scheme . '://' . $host . strtok($_SERVER['REQUEST_URI'], '?'));
+        $cron = 'wget -q --header="Authorization: Bearer ' . e($apiToken) . '" -O- "' . $fullUrl . '?action=compress"';
+        echo '<div class="card"><h2>Automate (optional)</h2>'
+           . '<p class="muted">To compress automatically on a schedule, add this line as a cron job in your hosting panel. '
+           . 'The token is sent in a header (kept out of server logs).</p>'
+           . '<pre style="background:#10201a;color:#c9e8d6;border-radius:10px;padding:12px;overflow-x:auto;'
+           . 'font:12px/1.5 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;word-break:break-all">'
+           . $cron . '</pre>'
+           . '<p class="muted">Keep this token private. It is different from your login password.</p></div>';
+    }
+
+    echo '<p class="muted" style="text-align:center">image-compressor v' . IC_VERSION
        . ' · open source (MIT) · also works from the command line and cron</p>';
 
     echo "<script>const CSRF = $csrf;</script>";

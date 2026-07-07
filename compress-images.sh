@@ -326,6 +326,11 @@ cmd_revert() {
             exit 1
         fi
     else
+        # Validate the timestamp format so --backup cannot traverse outside BACKUP_ROOT
+        if [[ ! "$BACKUP_CHOICE" =~ ^[0-9]{8}-[0-9]{6}$ ]]; then
+            error "Invalid backup name: $BACKUP_CHOICE (expected e.g. 20260707-153012 or 'latest')"
+            exit 1
+        fi
         backup_dir="$BACKUP_ROOT/$BACKUP_CHOICE"
     fi
 
