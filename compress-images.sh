@@ -80,7 +80,7 @@ BACKUP_ROOT="$TARGET_PATH/$BACKUP_DIRNAME/backups"
 # ---------------------------------------------------------------------------
 check_dependencies() {
     local missing=()
-    for cmd in jpegoptim pngquant gifsicle cwebp identify mogrify; do
+    for cmd in jpegoptim pngquant gifsicle cwebp identify mogrify file; do
         command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
     done
     if [[ ${#missing[@]} -gt 0 ]]; then
@@ -117,27 +117,53 @@ detect_scan_dirs() {
 # ---------------------------------------------------------------------------
 # Compression per format (operates in place; backup already taken)
 # ---------------------------------------------------------------------------
+
+# Security gate: confirm the file's ACTUAL content matches its extension before
+# handing it to ImageMagick. `file --mime-type` sniffs magic bytes and never
+# invokes an image delegate, so a malicious MVG/MSL/SVG/PS payload disguised as
+# .jpg is rejected here and never reaches identify/mogrify — closing the
+# ImageTragick / delegate-abuse class (CVE-2016-3714), which matters most since
+# this script may run as root.
+verify_image_content() {
+    local file="$1" ext="$2" mime expected
+    mime=$(file -b --mime-type -- "$file" 2>/dev/null) || return 1
+    case "$ext" in
+        jpg|jpeg) expected="image/jpeg" ;;
+        png)      expected="image/png"  ;;
+        gif)      expected="image/gif"  ;;
+        webp)     expected="image/webp" ;;
+        *)        return 1 ;;
+    esac
+    [[ "$mime" == "$expected" ]]
+}
+
 resize_if_needed() {
-    local file="$1"
+    local file="$1" coder="$2"
     [[ $DO_RESIZE -eq 1 ]] || return 0
     local dims w h
-    dims=$(identify -format '%w %h' "$file[0]" 2>/dev/null) || return 0
+    # Pin the input coder (e.g. "JPG:file") so ImageMagick cannot be steered into
+    # a different, delegate-backed decoder by the file's content.
+    dims=$(identify -format '%w %h' "${coder}:${file}[0]" 2>/dev/null) || return 0
     read -r w h <<< "$dims"
     if [[ "$w" -gt "$MAX_DIM" || "$h" -gt "$MAX_DIM" ]]; then
-        mogrify -auto-orient -resize "${MAX_DIM}x${MAX_DIM}>" "$file"
+        mogrify -auto-orient -resize "${MAX_DIM}x${MAX_DIM}>" "${coder}:${file}"
         echo "resized ${w}x${h}"
     fi
 }
 
 compress_file() {
     local file="$1" ext="$2"
+    if ! verify_image_content "$file" "$ext"; then
+        warn "Skipping (content does not match .$ext extension): ${file#"$TARGET_PATH"/}"
+        return 1
+    fi
     case "$ext" in
         jpg|jpeg)
-            resize_if_needed "$file" >/dev/null
+            resize_if_needed "$file" JPG >/dev/null
             jpegoptim --max="$QUALITY" --strip-all --all-progressive --quiet "$file"
             ;;
         png)
-            resize_if_needed "$file" >/dev/null
+            resize_if_needed "$file" PNG >/dev/null
             pngquant --quality="60-$QUALITY" --speed 1 --skip-if-larger --force --ext .png "$file" 2>/dev/null || true
             ;;
         gif)
@@ -145,7 +171,7 @@ compress_file() {
             gifsicle -O3 --batch "$file" 2>/dev/null || true
             ;;
         webp)
-            resize_if_needed "$file" >/dev/null
+            resize_if_needed "$file" WEBP >/dev/null
             local tmp="${file}.tmp.webp"
             if cwebp -quiet -q "$QUALITY" "$file" -o "$tmp" 2>/dev/null; then
                 if [[ $(file_size "$tmp") -lt $(file_size "$file") ]]; then

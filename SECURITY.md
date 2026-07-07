@@ -22,9 +22,15 @@ prefer to stay anonymous).
 
 ## Deployment reminders for users
 
-- Complete the setup wizard immediately after uploading `image-compressor.php`.
+- Complete the setup wizard after uploading `image-compressor.php`. Setup is
+  gated on a proof-of-ownership file you create, so an unfinished install cannot
+  be claimed by a passer-by — but still finish it promptly.
 - Delete the script from the server when you are done — it is a maintenance
   tool, not something to leave installed permanently.
+- Keep the host's ImageMagick `policy.xml` at distro defaults or stricter. The
+  tool validates image content and pins decoders, but a hardened system policy
+  is good defense in depth. Prefer running the CLI/bash version as a dedicated
+  low-privilege user rather than root.
 - The `.image-compressor/` directory is protected by an auto-generated
   `.htaccess` on Apache/LiteSpeed; on nginx, add an equivalent
   `location ~ /\.image-compressor { deny all; }` rule.

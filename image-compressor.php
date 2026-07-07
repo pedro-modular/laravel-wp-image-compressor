@@ -37,11 +37,13 @@
  * License: MIT
  */
 
-const IC_VERSION      = '1.1.0';
+const IC_VERSION      = '1.2.0';
 const ACCESS_TOKEN    = '';                 // Optional: hardcode a secret to skip the wizard. Empty = use wizard password.
 const BACKUP_DIRNAME  = '.image-compressor';
 const EXCLUDED_DIRS   = [BACKUP_DIRNAME, 'node_modules', 'vendor', '.git'];
 const IMAGE_EXTS      = ['jpg', 'jpeg', 'png', 'webp'];  // GIFs are left alone (animation-safe)
+const MAX_MEGAPIXELS  = 100;                // Skip images larger than this (decompression-bomb guard)
+const SETUP_SENTINEL  = 'image-compressor-ALLOW-SETUP.txt';  // Proof-of-ownership file for first-time setup
 
 error_reporting(E_ALL & ~E_DEPRECATED);
 @set_time_limit(0);
@@ -345,14 +347,65 @@ function compressImage(string $engine, string $file, string $tmp, array $cfg): b
 {
     $ext = strtolower(pathinfo($file, PATHINFO_EXTENSION));
     if ($ext === 'jpeg') { $ext = 'jpg'; }
+
+    // Security gate: decide what to decode from the file's ACTUAL content, never
+    // its extension. This blocks the ImageTragick / delegate-abuse class (a
+    // malicious MVG/MSL/SVG/PS payload disguised as .jpg) because getimagesize()
+    // is a native byte-sniffer that never invokes an image-library delegate — a
+    // disguised payload fails the check and is never handed to Imagick/GD. It
+    // also rejects extension/content mismatches and oversized decompression bombs.
+    if (!imageIsSafe($file, $ext)) { return false; }
+
     return $engine === 'imagick'
         ? compressWithImagick($file, $tmp, $ext, $cfg)
         : compressWithGd($file, $tmp, $ext, $cfg);
 }
 
+/**
+ * True only when $file is a genuine raster image whose real format matches its
+ * extension and whose pixel count is within the decompression-bomb budget.
+ */
+function imageIsSafe(string $file, string $ext): bool
+{
+    $info = @getimagesize($file);   // native magic-byte sniff; no delegates invoked
+    if ($info === false) {
+        out('  [skip] not a real image (content does not match a known format): ' . basename($file));
+        return false;
+    }
+    $expected = ['jpg' => IMAGETYPE_JPEG, 'png' => IMAGETYPE_PNG, 'webp' => IMAGETYPE_WEBP][$ext] ?? null;
+    if ($expected === null || (int)$info[2] !== $expected) {
+        out('  [skip] file content does not match its .' . $ext . ' extension: ' . basename($file));
+        return false;
+    }
+    $pixels = (int)$info[0] * (int)$info[1];
+    if ($pixels > MAX_MEGAPIXELS * 1_000_000) {
+        out(sprintf('  [skip] image too large (%d MP, limit %d MP): %s',
+            (int)round($pixels / 1_000_000), MAX_MEGAPIXELS, basename($file)));
+        return false;
+    }
+    return true;
+}
+
 function compressWithImagick(string $file, string $tmp, string $ext, array $cfg): bool
 {
-    $im = new Imagick($file);
+    // Cap the resources a single decode may consume, then pin the input coder to
+    // the extension (imageIsSafe() already proved they agree) so ImageMagick
+    // cannot be steered into a different, delegate-backed decoder.
+    $im = new Imagick();
+    $im->setResourceLimit(Imagick::RESOURCETYPE_MEMORY, 512 * 1024 * 1024);
+    $im->setResourceLimit(Imagick::RESOURCETYPE_MAP,    512 * 1024 * 1024);
+    $im->setResourceLimit(Imagick::RESOURCETYPE_AREA,   MAX_MEGAPIXELS * 1_000_000);
+    if (defined('Imagick::RESOURCETYPE_DISK')) {
+        $im->setResourceLimit(Imagick::RESOURCETYPE_DISK, 1024 * 1024 * 1024);
+    }
+    $coder = $ext === 'jpg' ? 'JPG' : strtoupper($ext);
+    $im->readImage($coder . ':' . $file);
+
+    // Refuse anything whose decoded format is not one we explicitly support.
+    if (!in_array(strtolower($im->getImageFormat()), ['jpeg', 'jpg', 'png', 'webp'], true)) {
+        $im->destroy();
+        return false;
+    }
     if ($im->getNumberImages() > 1) { $im->destroy(); return false; }  // animated — leave alone
 
     // Honor EXIF orientation before stripping metadata
@@ -489,7 +542,7 @@ function detectProjectType(string $path): string
     return 'generic';
 }
 
-function detectScanDirs(string $path, bool $announce = false): array
+function detectScanDirs(string $path, bool $announce = false, bool $fatal = true): array
 {
     $type = detectProjectType($path);
     $dirs = [];
@@ -505,7 +558,7 @@ function detectScanDirs(string $path, bool $announce = false): array
         if ($announce) { out('No Laravel/WordPress markers found — scanning the whole path'); }
         $dirs[] = $path;
     }
-    if (!$dirs) { fail("No image directories found under $path"); }
+    if (!$dirs && $fatal) { fail("No image directories found under $path"); }
     return $dirs;
 }
 
@@ -633,6 +686,23 @@ function authConfigured(): bool
     return ACCESS_TOKEN !== '' || isset(loadWebConfig()['password_hash']);
 }
 
+function setupSentinelPath(): string
+{
+    return __DIR__ . '/' . SETUP_SENTINEL;
+}
+
+/**
+ * First-time setup is gated on a proof-of-ownership file the operator must
+ * create next to the script. Creating a file requires filesystem access
+ * (cPanel File Manager / FTP / SSH), which a remote attacker scanning the URL
+ * does not have — this closes the "first HTTP visitor claims the installer"
+ * race without depending on any webserver config.
+ */
+function setupAllowed(): bool
+{
+    return is_file(setupSentinelPath());
+}
+
 function verifySecret(string $secret): bool
 {
     if ($secret === '') { return false; }
@@ -715,10 +785,13 @@ function handleAuthPost(string $action, array $req): void
     if ($action === 'setup') {
         if (authConfigured()) {
             flash('This tool is already set up.');
+        } elseif (!setupAllowed()) {
+            flash('Setup is locked. Create the file "' . SETUP_SENTINEL . '" next to this script first (see the instructions on this page).');
         } elseif (strlen($password) < 8) {
             flash('Please choose a password of at least 8 characters.');
         } else {
             saveWebConfig(['password_hash' => password_hash($password, PASSWORD_DEFAULT), 'created' => date('c')]);
+            @unlink(setupSentinelPath());  // one-time proof; remove so the gate can't be reused
             loginSession();
             flash('Setup complete! Keep your password safe — you will need it to log in and for cron jobs.');
         }
@@ -816,11 +889,38 @@ CSS;
 
 function renderSetup(): void
 {
-    $url = e(selfUrl());
+    $url      = e(selfUrl());
+    $sentinel = e(SETUP_SENTINEL);
+
+    if (!setupAllowed()) {
+        // Locked: require proof the visitor can write to the server's filesystem
+        // before any password can be set. Defeats the remote "first visitor wins" race.
+        echo <<<HTML
+        <div class="card">
+          <h1>🖼️ Image Compressor</h1>
+          <p class="muted">First-time setup — one quick safety step.</p>
+          <p>To prove you are the owner of this website (and stop anyone else on the internet
+             from claiming this tool), please create an empty file next to this script:</p>
+          <ol style="margin:12px 0 12px 22px">
+            <li>Open your hosting <strong>File Manager</strong> (or FTP) in the same folder where you uploaded this script.</li>
+            <li>Create a new, empty file named exactly:<br>
+                <code style="display:inline-block;background:#eef3f0;padding:4px 8px;border-radius:6px;margin-top:6px">$sentinel</code></li>
+            <li>Come back here and click the button below.</li>
+          </ol>
+          <form method="post" action="$url">
+            <input type="hidden" name="action" value="setup">
+            <div class="row"><button class="btn btn-secondary" type="submit">I've created the file — check again</button></div>
+          </form>
+          <div class="warnbox">This step happens only once. The file is deleted automatically as soon as setup finishes.</div>
+        </div>
+        HTML;
+        return;
+    }
+
     echo <<<HTML
     <div class="card">
       <h1>🖼️ Image Compressor</h1>
-      <p class="muted">First-time setup — takes 10 seconds.</p>
+      <p class="muted">Ownership confirmed ✓ — last step, takes 10 seconds.</p>
       <p>This tool shrinks the images on this website to make it faster and use less disk space.
          Every change is backed up first and can be undone with one click.</p>
       <form method="post" action="$url">
@@ -830,8 +930,7 @@ function renderSetup(): void
                placeholder="At least 8 characters" autofocus autocomplete="new-password">
         <div class="row"><button class="btn btn-primary" type="submit">Save password &amp; continue</button></div>
       </form>
-      <div class="warnbox">⚠️ Complete this setup right after uploading the file, so nobody else can claim it.
-      Delete the file from the server when you are finished.</div>
+      <div class="warnbox">⚠️ Delete this script from the server when you are finished with it.</div>
     </div>
     HTML;
 }
@@ -857,12 +956,14 @@ function renderDashboard(): void
 {
     $path   = __DIR__;
     $type   = detectProjectType($path);
-    $dirs   = detectScanDirs($path);
+    $dirs   = detectScanDirs($path, false, false);  // tolerate a project with no image folders yet
     $engine = extension_loaded('imagick') ? 'Imagick' : (extension_loaded('gd') ? 'GD' : 'none');
     $csrf   = json_encode($_SESSION['csrf'] ?? '');
     $url    = e(selfUrl());
 
-    $dirList = implode(', ', array_map(fn ($d) => e(relPath($d, $path) ?: '.'), $dirs));
+    $dirList = $dirs
+        ? implode(', ', array_map(fn ($d) => e(relPath($d, $path) ?: '.'), $dirs))
+        : '<em>no image folder found here yet</em>';
     $typeLabel = $type === 'generic' ? 'Website folder' : e($type) . ' website';
 
     echo <<<HTML

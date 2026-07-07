@@ -38,8 +38,8 @@ Two interchangeable flavors — same commands, same backup format, same safety r
 ### Option A: from the browser — built-in GUI (for everyone, including non-technical users)
 
 1. Upload `image-compressor.php` to the project root (next to `artisan` or `wp-config.php`) using cPanel **File Manager**.
-2. Visit `https://your-site.com/image-compressor.php` — a setup wizard asks you to choose a password (do this right after uploading, so nobody else can claim it).
-3. You land on a dashboard with plain-language controls: **Preview** (changes nothing), **Compress images**, quality and max-size dropdowns, live progress, and an **Undo** button next to every backup.
+2. Visit `https://your-site.com/image-compressor.php`. The setup wizard first asks you to prove you own the site by creating an empty file named `image-compressor-ALLOW-SETUP.txt` in the same folder (File Manager → **+ File**). This one-time step stops anyone else on the internet from claiming the tool before you do; the file is deleted automatically once setup finishes.
+3. Reload, choose a password, and you land on a dashboard with plain-language controls: **Preview** (changes nothing), **Compress images**, quality and max-size dropdowns, live progress, and an **Undo** button next to every backup.
 4. Big sites are handled automatically — the run pauses before the PHP time limit and continues itself until everything is done.
 5. **Delete the file from the server when you are finished.**
 
@@ -118,7 +118,7 @@ Backups live inside the project so they travel with it. Add `.image-compressor/`
 - WordPress generates multiple thumbnail sizes per upload; all get compressed. If you set `--max-dim` below your theme's largest registered size, regenerate thumbnails afterwards (`wp media regenerate`).
 - Safe to run repeatedly. The PHP version keeps a registry of optimized files and skips them on re-runs, so JPEGs are never re-encoded twice.
 - Animated GIFs and animated WebPs are detected and left untouched by the PHP version.
-- Browser mode is protected by a password (stored as a bcrypt hash, never in plain text), CSRF-protected sessions, and an `.htaccess` that blocks direct web access to backups and config. Still: remove the script when finished.
+- Browser mode is protected by a password (stored as a bcrypt hash, never in plain text), CSRF-protected sessions, a proof-of-ownership file gate on first-time setup, and an `.htaccess` that blocks direct web access to backups and config. Uploaded images are validated by their real content (not their extension) before processing, so disguised payloads and decompression bombs are skipped. Still: remove the script when finished.
 
 ## Contributing & security
 
